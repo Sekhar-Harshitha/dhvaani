@@ -251,13 +251,13 @@ class GeminiModelWrapper:
                         "model": OPENROUTER_MODEL,
                         "messages": [{"role": "user", "content": prompt_text}],
                         "temperature": 0.1,
-                        "max_tokens": 1200,
+                        "max_tokens": 500,
                     }
                     resp = requests.post(
                         "https://openrouter.ai/api/v1/chat/completions",
                         headers=headers,
                         json=payload,
-                        timeout=25
+                        timeout=10
                     )
                     if resp.status_code == 200:
                         data = resp.json()
