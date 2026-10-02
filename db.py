@@ -59,6 +59,8 @@ def get_db_path() -> Path:
     env_path = os.getenv("DHVAANI_DB_PATH")
     if env_path:
         return Path(env_path)
+    if os.getenv("VERCEL") or os.getenv("AWS_LAMBDA_FUNCTION_NAME"):
+        return Path("/tmp/dhvaani.db")
     return DEFAULT_DB_PATH
 
 
