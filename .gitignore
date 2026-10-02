@@ -25,3 +25,5 @@ data/uploads/*
 
 # Vercel deployment cache
 .vercel
+
+.vercel
