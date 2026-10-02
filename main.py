@@ -31,6 +31,7 @@ from pathlib import Path
 from schemes_db import GOVERNMENT_SCHEMES, GRIEVANCE_DEPARTMENTS
 import db
 from services_catalog import ServiceCatalog, GRIEVANCE_SERVICES
+import storage
 
 # ──────────────────────────────────────────────
 # CONFIG
@@ -65,17 +66,32 @@ from contextlib import asynccontextmanager
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize SQLite database and load stored requests on startup."""
+    """Initialize database and load stored requests on startup."""
     db.init_db()
     db.load_all_requests_to_memory(GRIEVANCE_STORE)
     yield
 
-app = FastAPI(title="Dhvaani API", version="1.6.0", lifespan=lifespan)  # Phase 6: Verified Service Layer
+app = FastAPI(title="Dhvaani API", version="1.8.0", lifespan=lifespan)
+
+# Dynamic CORS configuration: Production Vercel domain, local development, or configured origins
+_allowed_env = os.getenv("ALLOWED_ORIGINS", "").strip()
+if _allowed_env:
+    _origins = [o.strip() for o in _allowed_env.split(",") if o.strip()]
+else:
+    _origins = [
+        "https://dhvaani.vercel.app",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_origins,
+    allow_origin_regex=r"^https://[a-zA-Z0-9_-]+\.vercel\.app$",
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -84,13 +100,27 @@ static_path.mkdir(exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
 
 # ──────────────────────────────────────────────
-# UPLOAD DIRECTORY CONFIGURATION (Phase 7)
+# UPLOAD DIRECTORY CONFIGURATION (Phase 7 + Vercel)
 # ──────────────────────────────────────────────
 # NEVER expose the upload directory as a public static folder.
 # All uploads are served only through the explicit /api/attachments endpoint.
 _default_upload_dir = Path(__file__).parent / "data" / "uploads"
-UPLOAD_DIR = Path(os.getenv("DHVAANI_UPLOAD_DIR", str(_default_upload_dir)))
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+_env_upload_dir = os.getenv("DHVAANI_UPLOAD_DIR")
+if _env_upload_dir:
+    UPLOAD_DIR = Path(_env_upload_dir)
+elif os.getenv("VERCEL") or os.getenv("AWS_LAMBDA_FUNCTION_NAME"):
+    UPLOAD_DIR = Path("/tmp/uploads")
+else:
+    UPLOAD_DIR = _default_upload_dir
+
+try:
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+except Exception:
+    UPLOAD_DIR = Path("/tmp/uploads")
+    try:
+        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
 
 MAX_FILE_SIZE = 10 * 1024 * 1024   # 10 MB
 MAX_FILES_PER_REQUEST = 5
@@ -1370,14 +1400,21 @@ async def index():
 async def health():
     """
     Health check endpoint.
-    Reports backend status, Gemini configuration, Sarvam configuration, and database availability.
-    Does NOT expose the API key.
+    Reports backend status, database connectivity, storage availability, Gemini configuration, and Sarvam configuration.
+    Does NOT expose any secrets, credentials, or private URLs.
     """
     gemini_status = "configured" if is_gemini_ready() else "not_configured"
     sarvam_status = "configured" if is_sarvam_ready() else "not_configured"
     openrouter_status = "configured" if is_openrouter_ready() else "not_configured"
+    db_health = db.check_db_health()
+    storage_configured = storage.is_blob_configured()
+
     return {
         "status": "online",
+        "database": db_health.get("status", "unknown"),
+        "database_type": db_health.get("type", "sqlite"),
+        "storage": "configured" if storage_configured else "local_ready",
+        "storage_type": "vercel_blob" if storage_configured else "local_disk",
         "gemini": gemini_status,
         "gemini_configured": is_gemini_ready(),
         "openrouter": openrouter_status,
@@ -2449,11 +2486,29 @@ async def upload_attachments(
             errors.append({"filename": _sanitize_original_filename(f.filename), "error": "Path traversal blocked."})
             continue
 
+        local_saved = False
         try:
             dest_path.write_bytes(data)
-        except Exception as e:
-            print(f"[Dhvaani] Attachment write error: {e}")
-            errors.append({"filename": _sanitize_original_filename(f.filename), "error": "Could not save file."})
+            local_saved = True
+        except Exception:
+            # Serverless fallback to /tmp
+            try:
+                tmp_path = Path("/tmp/uploads") / stored_filename
+                tmp_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp_path.write_bytes(data)
+                local_saved = True
+            except Exception:
+                pass
+
+        # Vercel Blob cloud upload when token is configured
+        blob_url = None
+        if storage.is_blob_configured():
+            blob_url = storage.upload_to_blob(
+                stored_filename, data, (f.content_type or "").split(";")[0].strip()
+            )
+
+        if not local_saved and not blob_url:
+            errors.append({"filename": _sanitize_original_filename(f.filename), "error": "Could not save file to storage."})
             continue
 
         now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -2465,12 +2520,14 @@ async def upload_attachments(
             "content_type": (f.content_type or "").split(";")[0].strip(),
             "file_size": len(data),
             "created_at": now_iso,
+            "blob_url": blob_url,
         }
         try:
             db.save_attachment(meta)
         except Exception as e:
             print(f"[Dhvaani] Attachment DB error: {e}")
-            # Remove orphan file on DB failure
+            if blob_url:
+                storage.delete_from_blob(blob_url)
             try:
                 dest_path.unlink(missing_ok=True)
             except Exception:
@@ -2485,6 +2542,7 @@ async def upload_attachments(
             "file_size": len(data),
             "created_at": now_iso,
             "dhvaani_request_id": dhvaani_request_id,
+            "blob_url": blob_url,
         })
 
     if not saved and errors:
@@ -2506,7 +2564,7 @@ async def upload_attachments(
 async def delete_attachment_endpoint(attachment_id: str):
     """
     Phase 7: Remove an uploaded attachment by its attachment_id.
-    Deletes both the on-disk file and the database record.
+    Deletes both the on-disk/blob file and the database record.
     """
     # Validate attachment_id is a UUID to prevent path traversal
     try:
@@ -2524,6 +2582,10 @@ async def delete_attachment_endpoint(attachment_id: str):
             detail={"error": "Attachment not found.", "attachment_id": attachment_id},
         )
 
+    # Remove from Vercel Blob if stored in cloud
+    if row and row.get("blob_url"):
+        storage.delete_from_blob(row["blob_url"])
+
     # Remove the physical file
     if row and row.get("stored_filename"):
         stored = row["stored_filename"]
@@ -2535,6 +2597,7 @@ async def delete_attachment_endpoint(attachment_id: str):
                 dest_path.unlink(missing_ok=True)
             except Exception as e:
                 print(f"[Dhvaani] Attachment file delete error: {e}")
+
 
     return {
         "success": True,

@@ -1,5 +1,7 @@
 # Environment variables & secrets
 .env
+.env.*
+!.env.example
 
 # SQLite Database
 *.db
@@ -24,6 +26,4 @@ data/uploads/*
 !data/uploads/.gitkeep
 
 # Vercel deployment cache
-.vercel
-
 .vercel

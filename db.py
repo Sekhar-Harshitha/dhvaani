@@ -17,14 +17,36 @@ import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
-DATABASE_URL = os.getenv("DATABASE_URL", "")
-_use_postgres = bool(DATABASE_URL and DATABASE_URL.startswith("postgres"))
+def get_clean_database_url() -> str:
+    url = os.getenv("DATABASE_URL", "").strip()
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://"):]
+    return url
 
-if _use_postgres:
-    import psycopg2
-    import psycopg2.extras
-else:
-    import sqlite3
+
+def is_postgres() -> bool:
+    url = get_clean_database_url()
+    return bool(url and (url.startswith("postgresql://") or url.startswith("postgres://")))
+
+
+def check_db_health() -> Dict[str, Any]:
+    """Safe database health check without leaking credentials or connection strings."""
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT 1")
+        cur.close()
+        conn.close()
+        return {
+            "status": "connected",
+            "type": "postgresql" if is_postgres() else "sqlite"
+        }
+    except Exception:
+        return {
+            "status": "error",
+            "type": "postgresql" if is_postgres() else "sqlite"
+        }
+
 
 DEFAULT_DB_PATH = Path(__file__).parent / "dhvaani.db"
 
@@ -42,10 +64,18 @@ def get_db_path() -> Path:
 
 def get_connection(db_path=None):
     """Return a database connection (Postgres or SQLite)."""
-    if _use_postgres:
-        conn = psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+    if is_postgres():
+        import psycopg2
+        import psycopg2.extras
+        db_url = get_clean_database_url()
+        conn = psycopg2.connect(
+            db_url,
+            cursor_factory=psycopg2.extras.RealDictCursor,
+            connect_timeout=5
+        )
         return conn
     else:
+        import sqlite3
         target = db_path or get_db_path()
         conn = sqlite3.connect(str(target), check_same_thread=False)
         conn.row_factory = sqlite3.Row
@@ -54,7 +84,7 @@ def get_connection(db_path=None):
 
 def _placeholder(n: int = 1) -> str:
     """Return the correct SQL placeholder for the current DB backend."""
-    if _use_postgres:
+    if is_postgres():
         return "%s"
     return "?"
 
@@ -65,7 +95,7 @@ def _placeholders(n: int) -> str:
 
 
 def _autoincrement() -> str:
-    if _use_postgres:
+    if is_postgres():
         return "SERIAL PRIMARY KEY"
     return "INTEGER PRIMARY KEY AUTOINCREMENT"
 
@@ -77,10 +107,7 @@ def _autoincrement() -> str:
 def init_db(db_path=None):
     """Create schema tables if they do not exist."""
     conn = get_connection(db_path)
-    if _use_postgres:
-        cursor = conn.cursor()
-    else:
-        cursor = conn.cursor()
+    cursor = conn.cursor()
 
     autoincrement = _autoincrement()
 
@@ -139,7 +166,7 @@ def init_db(db_path=None):
 
     # Ensure migration for existing tables
     try:
-        if not _use_postgres:
+        if not is_postgres():
             cursor.execute("PRAGMA table_info(attachments)")
             cols = [r[1] for r in cursor.fetchall()]
             if cols and "blob_url" not in cols:
@@ -318,7 +345,7 @@ def save_attachment(meta: Dict[str, Any], db_path=None):
     conn = get_connection(db_path)
     cursor = conn.cursor()
     ph = _placeholder()
-    if _use_postgres:
+    if is_postgres():
         cursor.execute("""
             INSERT INTO attachments
                 (attachment_id, dhvaani_request_id, original_filename, stored_filename,
