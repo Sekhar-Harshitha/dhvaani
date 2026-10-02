@@ -12,12 +12,12 @@ failures = []
 def check(name, fn):
     try:
         fn()
-        print(f'✓ {name}')
+        print(f'[OK] {name}')
     except AssertionError as e:
-        print(f'✗ {name}: Assertion failed — {e}')
+        print(f'[FAIL] {name}: Assertion failed - {e}')
         failures.append(name)
     except Exception as e:
-        print(f'✗ {name}: {type(e).__name__} — {e}')
+        print(f'[FAIL] {name}: {type(e).__name__} - {e}')
         failures.append(name)
 
 # 1. Health

@@ -39,7 +39,7 @@ import storage
 
 load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-if GEMINI_API_KEY and GEMINI_API_KEY != "your_gemini_api_key_here":
+if GEMINI_API_KEY and GEMINI_API_KEY not in ("your_gemini_api_key_here", ""):
     try:
         genai.configure(api_key=GEMINI_API_KEY)
         _gemini_ready = True
@@ -215,10 +215,10 @@ class OpenRouterGeminiResponse:
 class GeminiModelWrapper:
     """Resilient Gemini model wrapper routing through OpenRouter with fallback to Google SDK."""
     _model_order: List[str] = [
-        "gemini-3.5-flash",
-        "gemini-3.5-flash-lite",
-        "gemini-3.8-flash",
-        "gemini-flash-latest",
+        "gemini-2.0-flash",
+        "gemini-2.0-flash-lite",
+        "gemini-1.5-flash",
+        "gemini-1.5-flash-8b",
     ]
 
     def __init__(self, model_names: Optional[List[str]] = None):
