@@ -55,11 +55,30 @@ DEFAULT_DB_PATH = Path(__file__).parent / "dhvaani.db"
 # CONNECTION HELPERS
 # ──────────────────────────────────────────────
 
+def _is_serverless() -> bool:
+    """Detect serverless/read-only filesystem environments."""
+    return bool(
+        os.getenv("VERCEL")
+        or os.getenv("VERCEL_ENV")
+        or os.getenv("VERCEL_URL")
+        or os.getenv("AWS_LAMBDA_FUNCTION_NAME")
+        or os.getenv("LAMBDA_TASK_ROOT")
+    )
+
+
 def get_db_path() -> Path:
     env_path = os.getenv("DHVAANI_DB_PATH")
     if env_path:
         return Path(env_path)
-    if os.getenv("VERCEL") or os.getenv("AWS_LAMBDA_FUNCTION_NAME"):
+    if _is_serverless():
+        return Path("/tmp/dhvaani.db")
+    # Also check if default path is writable; if not, use /tmp
+    try:
+        DEFAULT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        test_file = DEFAULT_DB_PATH.parent / ".write_test"
+        test_file.write_text("ok")
+        test_file.unlink()
+    except (OSError, PermissionError):
         return Path("/tmp/dhvaani.db")
     return DEFAULT_DB_PATH
 
@@ -108,6 +127,8 @@ def _autoincrement() -> str:
 
 def init_db(db_path=None):
     """Create schema tables if they do not exist."""
+    if not is_postgres() and db_path is None:
+        db_path = get_db_path()
     conn = get_connection(db_path)
     cursor = conn.cursor()
 
@@ -196,6 +217,8 @@ def _row_to_dict(row) -> dict:
 
 def save_or_update_request(data: Dict[str, Any], db_path=None):
     """Upsert a Dhvaani request record."""
+    if not is_postgres() and db_path is None:
+        db_path = get_db_path()
     init_db(db_path)
     conn = get_connection(db_path)
     cursor = conn.cursor()
