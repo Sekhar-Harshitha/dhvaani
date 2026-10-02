@@ -18,7 +18,8 @@ import re
 import string
 from typing import Optional, List, Dict, Any
 
-import google.generativeai as genai
+from google import genai
+from google.genai import types as genai_types
 import requests
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form
 from fastapi.staticfiles import StaticFiles
@@ -39,9 +40,10 @@ import storage
 
 load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+_gemini_client = None
 if GEMINI_API_KEY and GEMINI_API_KEY not in ("your_gemini_api_key_here", ""):
     try:
-        genai.configure(api_key=GEMINI_API_KEY)
+        _gemini_client = genai.Client(api_key=GEMINI_API_KEY)
         _gemini_ready = True
     except Exception:
         _gemini_ready = False
@@ -273,12 +275,17 @@ class GeminiModelWrapper:
                     print(f"[Dhvaani] OpenRouter exception: {e}")
 
         # 2. Fallback to direct Gemini SDK if configured
+        if not _gemini_client:
+            raise RuntimeError("No Gemini client configured. Set GEMINI_API_KEY.")
         last_exc = None
         current_list = list(GeminiModelWrapper._model_order) if not self.model_names else list(self.model_names)
         for m_name in current_list:
             try:
-                m = genai.GenerativeModel(m_name)
-                res = m.generate_content(*args, **kwargs)
+                res = _gemini_client.models.generate_content(
+                    model=m_name,
+                    contents=args[0] if args else kwargs.get('contents', ''),
+                    config=genai_types.GenerateContentConfig(temperature=0.1)
+                )
                 # Keep successful model at front
                 if m_name in GeminiModelWrapper._model_order and GeminiModelWrapper._model_order[0] != m_name:
                     GeminiModelWrapper._model_order.remove(m_name)
@@ -286,9 +293,11 @@ class GeminiModelWrapper:
                 return res
             except Exception as e:
                 last_exc = e
+                err_str = str(e)
                 err_type = type(e).__name__
-                if "ResourceExhausted" in err_type or "NotFound" in err_type or "429" in str(e) or "404" in str(e):
-                    # Move exhausted model to back
+                if ("ResourceExhausted" in err_type or "NotFound" in err_type
+                        or "429" in err_str or "404" in err_str or "400" in err_str):
+                    # Move failing model to back and try next
                     if m_name in GeminiModelWrapper._model_order:
                         GeminiModelWrapper._model_order.remove(m_name)
                         GeminiModelWrapper._model_order.append(m_name)
@@ -2373,7 +2382,8 @@ async def set_api_key(request: SetKeyRequest):
             detail={"error": "Invalid API key format", "message": "Gemini keys start with 'AIza' or 'AQ.', OpenRouter keys start with 'sk-or-', and Sarvam keys start with 'sk_'."},
         )
     GEMINI_API_KEY = key
-    genai.configure(api_key=GEMINI_API_KEY)
+    global _gemini_client
+    _gemini_client = genai.Client(api_key=GEMINI_API_KEY)
     _gemini_ready = True
     return {"success": True, "message": "Gemini API key configured. AI features enabled."}
 
